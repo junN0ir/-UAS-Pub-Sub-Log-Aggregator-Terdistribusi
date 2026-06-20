@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+  storage:
+    image: postgres:16-alpine
+    container_name: pg_storage
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: logdb
+      POSTGRES_USER: loguser
+      POSTGRES_PASSWORD: logpass
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init-db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loguser -d logdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  broker:
+    image: redis:7-alpine
+    container_name: redis_broker
+    restart: unless-stopped
+    volumes:
+      - broker_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  aggregator:
+    build:
+      context: ./aggregator
+      dockerfile: Dockerfile
+    container_name: aggregator_service
+    restart: unless-stopped
+    depends_on:
+      storage:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://loguser:logpass@storage:5432/logdb
+      REDIS_URL: redis://broker:6379
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8080"
+      WORKER_COUNT: "4"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  publisher:
+    build:
+      context: ./publisher
+      dockerfile: Dockerfile
+    container_name: publisher_service
+    restart: unless-stopped
+    depends_on:
+      aggregator:
+        condition: service_healthy
+    environment:
+      AGGREGATOR_URL: "http://aggregator:8080"
+      EVENTS_TO_SEND: "500"
+      DUPLICATE_RATIO: "0.3"
+      CONCURRENCY: "5"
+
+volumes:
+  pg_data:
+    driver: local
+  broker_data:
+    driver: local
